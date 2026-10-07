@@ -1,6 +1,6 @@
 # Integrácia GovBox Pro do advokátskej praxe, LAWOSS a Chevron7
 
-Analýza a rozhodnutia zo 6. – 7. 10. 2026. Tento priečinok nie je súčasťou pôvodného projektu GovBox Pro (slovensko-digital/govbox-pro); eviduje zámer, ako ho využiť v praxi a v aplikáciách LAWOSS a Chevron7.
+Analýza a rozhodnutia zo 6. – 7. 10. 2026, doplnené 7. 10. 2026 po overení v kóde. Tento priečinok nie je súčasťou pôvodného projektu GovBox Pro (slovensko-digital/govbox-pro); eviduje zámer, ako ho využiť v praxi a v aplikáciách LAWOSS a Chevron7.
 
 ## 1. Čo je GovBox Pro
 
@@ -14,16 +14,27 @@ Webová aplikácia (Ruby on Rails, licencia EUPL 1.2) na prácu so schránkami n
 - Schránka Finančnej správy / eDane (`app/models/fs`, `app/lib/fs`) popri ÚPVS.
 - Otvorené REST API: [public/openapi.yaml](../public/openapi.yaml).
 
-GovBox Pro sa na ÚPVS nenapája sám, ide cez prostredníka (`app/lib/upvs_environment.rb`, `Upvs::GovboxApiClient`): službu GovBox API alebo vlastný [slovensko-sk-api](https://github.com/slovensko-digital/slovensko-sk-api).
+GovBox Pro sa na ÚPVS nenapája sám. Volá prostredníka na adrese `GB_API_URL` (`app/services/upvs/govbox_api_client.rb`, `app/lib/upvs/govbox_api.rb`): buď službu GovBox API, alebo vlastný [slovensko-sk-api](https://github.com/slovensko-digital/slovensko-sk-api).
+
+**Oba prostredníky hovoria rovnakým protokolom** (overené v kóde): endpointy `/api/edesk/*` a `/api/sktalk/*`, autentifikácia JWT `{sub, obo, exp, jti}` podpísaným RS256 súkromným kľúčom pripojenia schránky (`app/lib/upvs/api.rb:23`, model `Govbox::ApiConnection` so stĺpcami `sub`, `obo`, `api_token_private_key`). GovBox API je teda hosťovaný slovensko-sk-api; vlastná inštancia s vlastným technickým účtom sa ovláda rovnako, mení sa len URL, `sub` a kľúč.
 
 ## 2. Technický účet na slovensko.sk
 
-| Cesta | Technický účet od NASES | Poznámka |
-|---|---|---|
-| **A) GovBox API / hosťovaný GovBox Pro** (Služby Slovensko.Digital) | **Nie.** Integráciu na ÚPVS má prevádzkovateľ, používateľ mu udelí prístup k svojej schránke. | Platená služba, rýchly štart. |
-| **B) Vlastný slovensko-sk-api** | **Áno.** Integračný proces s NASES, certifikáty, testovanie na skúšobnom prostredí. | Plná nezávislosť, mesiace administratívy. |
+Pre plugin z toho vychádzajú **dva adaptéry a štyri situácie používateľa**:
 
-**Rozhodnutie:** cesta A. Ceny a podmienky treba overiť na [ekosystem.slovensko.digital](https://ekosystem.slovensko.digital/sluzby/govbox-api) (neoverené).
+| Situácia používateľa | Technický účet od NASES | Adaptér v plugine |
+|---|---|---|
+| 1. Platí hosťovaný GovBox Pro (`pro.govbox.sk`) | nie – integráciu na ÚPVS má prevádzkovateľ | **GovBox Pro API** (tenký) |
+| 2. Prevádzkuje vlastný GovBox Pro (EUPL) s `GB_API_URL` na vlastný slovensko-sk-api | áno | **GovBox Pro API** (ten istý) |
+| 3. Platí iba GovBox API (bez Pro) | nie | **slovensko-sk-api** (ťažký) |
+| 4. Prevádzkuje iba vlastný slovensko-sk-api | áno | **slovensko-sk-api** (ten istý) |
+
+- Používateľ s vlastným technickým účtom nepotrebuje v plugine nič osobitné. Najlepšie mu poslúži situácia 2 – plugin zostáva rovnako tenký ako pri situácii 1.
+- Adaptér slovensko-sk-api (situácie 3, 4) by musel sám robiť to, čo dnes robí GovBox Pro: synchronizáciu priečinkov a správ, skladanie vlákien, spracovanie XML formulárov, autorizáciu doručeniek, odosielanie cez SKTalk. To je prakticky prepis GovBox Pro.
+- Priame napojenie na ÚPVS bez slovensko-sk-api (vlastná implementácia SOAP, STS, WS-Security s certifikátom technického účtu) sa neodporúča.
+- Proces získania technického účtu u NASES (zmluva, certifikát, testovanie, či ho dostane aj advokát ako fyzická osoba – podnikateľ) **nie je overený**.
+
+**Rozhodnutie:** najprv adaptér GovBox Pro API (situácie 1 a 2). Rozhranie adaptéra navrhnúť tak, aby sa dal neskôr doplniť adaptér slovensko-sk-api. Ceny a podmienky GovBox Pro / GovBox API treba overiť na [ekosystem.slovensko.digital](https://ekosystem.slovensko.digital/sluzby/govbox-api) (neoverené).
 
 ## 3. Zvolený model: plugin / App do LAWOSS, „bring your own account“
 
@@ -47,7 +58,9 @@ Zdroj: `app/lib/api_token_authenticator.rb`, [DEVELOPER.md](../DEVELOPER.md), `s
 2. **Súkromný kľúč** zostáva u neho (macOS Keychain).
 3. Plugin si sám vytvára JWT: RS256, `sub` = ID tenanta, `exp` najviac 5 minút, `jti` unikátny (32–256 znakov).
 
-API je za prepínačom tenanta `feature_flags << :api` – zrejme ho musí zapnúť prevádzkovateľ.
+**Rozsah prístupu = celý tenant.** Tenant má jeden verejný kľúč (`api_token_public_key`) a `sub` je ID tenanta (`app/lib/api_environment.rb:16`). Súkromný kľúč v Keychaine teda otvára **všetky schránky a vlákna kancelárie**, nie iba schránky jedného advokáta. Výber schránok na synchronizáciu musí preto robiť plugin a kľúč treba chrániť ako prístup k celej kancelárii.
+
+**Zapnutie API (overené):** `:api` je v `Tenant::ALL_FEATURE_FLAGS` (`app/models/tenant.rb:67`). Zapína ho site admin cez `/api/site_admin/tenants`; kým nie je zapnuté, administrátor tenanta nevidí v menu položku „API Prístup“ (`app/lib/sidebar_menu.rb:41`, `app/policies/admin/api_access_policy.rb`).
 
 ### Rozsah MVP
 
@@ -67,13 +80,27 @@ Oba projekty stoja na Autograme, prepojenie je prirodzené:
 
 - **Potvrdenie doručenky je právny úkon** – písomnosť je doručená a plynú lehoty. Automatizácia ani AI agent ho nesmie spustiť bez potvrdenia človekom. To isté platí pre `submit`.
 - **Advokátske tajomstvo:** posielanie obsahu schránky do cloudovej AI vyžaduje jasné pravidlá; preferovať lokálne spracovanie.
+- **Jeden kľúč na celú kanceláriu:** únik súkromného kľúča tenanta sprístupní všetky schránky. Kľúč patrí do Keychainu, nikdy do konfiguračných súborov ani logov.
 - **Licencie:** komunikácia iba cez API → EUPL sa LAWOSS (MIT) netýka. Kopírovanie kódu GovBox Pro do LAWOSS by prinieslo povinnosti podľa EUPL.
 - **Tento repozitár:** názov `govbox-pro-macOS` naznačuje natívnu Mac verziu, no obsah je zatiaľ pôvodný webový Rails projekt.
 
 ## 6. Otvorené úlohy
 
+> **Stav: odložené (7. 10. 2026).** Integráciu teraz neriešime. Pri návrate začať rozhodnutiami nižšie a fázou 0 zo [špecifikácie](SPECIFIKACIA-PLUGINU.md#13-fázy-dodania).
+
+**Rozhodnutia, ktoré čakajú** (podrobne v časti 14 špecifikácie):
+
+- [ ] Nové miesta v OKF: `VSTUPY.md` a `00_Na_zatriedenie/` u klienta a triediaca schránka `Office/Schranky/<schránka>/` – odsúhlasiť a doplniť šablóny v `lawoss/okf/templates`.
+- [ ] Cieľ správ zo schránky: `00_Na_zatriedenie`, alebo rovno `05_Komunikacia/Dolezita_posta`.
+- [ ] Predvolený režim mapovania počas alfa verzie: `auto`, alebo `navrh`.
+- [ ] Zápis do `VSTUPY.md`: plugin sám, alebo nový príkaz `okf input add` v LAWOSS (odporúčané).
+
+**Úlohy:**
+
 - [ ] Opýtať sa podpora@slovensko.digital: ako sa zapína API (`:api`) pre zákazníka tretej strany, v akom pláne a za akú cenu.
 - [ ] Navrhnúť Slovensko.Digital partnerstvo / uvedenie LAWOSS ako integrácie.
-- [ ] Napísať špecifikáciu pluginu v repozitári LAWOSS (nástroje, schéma konfigurácie, uloženie kľúčov, potvrdzovacie kroky).
-- [ ] Rozbehať GovBox Pro lokálne (staging `https://govbox-pro.staging.slovensko.digital`) a vyskúšať API.
+- [x] Napísať špecifikáciu pluginu – [SPECIFIKACIA-PLUGINU.md](SPECIFIKACIA-PLUGINU.md) (neskôr presunúť do repozitára LAWOSS).
+- [ ] Overiť proces a podmienky technického účtu u NASES pre advokáta.
+- [ ] Fáza 0: rozbehať GovBox Pro lokálne (staging `https://govbox-pro.staging.slovensko.digital`) a vyskúšať API.
+- [ ] Upstream PR do `slovensko-digital/govbox-pro`: `box_id`, `outbox`, `draft` v odpovediach `/api/messages/*` (špecifikácia, časť 12).
 - [ ] Návrh prepojenia Chevron7 ↔ GovBox Pro API (konverzia, podpis).
